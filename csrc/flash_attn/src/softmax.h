@@ -44,15 +44,21 @@ __device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0> &dst, T
 }
 
 template<bool zero_init=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
-__device__ __forceinline__ void reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1> &summary, Operator &op) {
-    thread_reduce_<zero_init>(tensor, summary, op);
-    quad_allreduce_(summary, summary, op);
+__device__ __forceinline__ void reduce_(Tensor<Engine0, Layout0> const& tensor1, Tensor<Engine1, Layout1> &tensor2, Operator &op) {
+    thread_reduce_<zero_init>(tensor1, tensor2, op);
+    (quad_allreduce_)(tensor2, tensor2, op);
 }
 
 template<bool zero_init=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __device__ __forceinline__ void reduce_max(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1> &max){
     MaxOp<float> max_op;
     reduce_<zero_init>(tensor, max, max_op);
+}
+
+template<bool zero_init=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
+__device__ __forceinline__ void reduce_sum_aw(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1> &sum){
+    AbsSumOp<float> abs_sum_op;
+    reduce_<zero_init>(tensor, sum, abs_sum_op);
 }
 
 template<bool zero_init=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
@@ -129,13 +135,29 @@ struct Softmax {
 
     using TensorT = decltype(make_tensor<float>(Shape<Int<kNRows>>{}));
     TensorT row_max, row_sum;
+    // TensorT row_sum_aw;
 
     __forceinline__ __device__ Softmax() {};
 
     template<bool Is_first, bool Check_inf=false, typename Tensor0, typename Tensor1>
     __forceinline__ __device__ void softmax_rescale_o(Tensor0 &acc_s, Tensor1 &acc_o, float softmax_scale_log2) {
         // Reshape acc_s from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
+        // 当前这个张量是acc_s,最外层有4个Tensor Core Tile，4就是MMA tile的个数
+        // Tile 0 | Tile 1
+        // Tile 2 | Tile 3
+        // reshape后
+        // +-----------------------+
+        // |    nrow = (2 * 16)    |
+        // +-----------------------+
+        // |    ncol = (2 * 16)    |
+        // +-----------------------+
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
+
+        // // 计算当前block权重和
+        // clear(row_sum_aw);
+        // flash::reduce_sum_aw</*zero_init=*/true>(scores, row_sum_aw);
+        
+        // KNRows 代表的是 2 * acc_o size<1>
         static_assert(decltype(size<0>(scores))::value == kNRows);
         if (Is_first) {
             flash::template reduce_max</*zero_init=*/true>(scores, row_max);
@@ -183,6 +205,11 @@ struct Softmax {
         }
         return lse;
     };
+
+    // template<>
+    // __forceinline__ __device__ TensorT get_attention_weights_sum() const {
+    //     return row_sum_aw;
+    // }
 };
 
 }  // namespace flash

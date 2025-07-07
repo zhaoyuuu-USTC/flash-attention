@@ -17,6 +17,7 @@
 #include "mask.h"
 #include "dropout.h"
 #include "rotary.h"
+#include "attention_sum.h"
 
 namespace flash {
 
@@ -514,8 +515,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     // The thread index.
     const int tidx = threadIdx.x;
 
-    constexpr int kBlockM = Kernel_traits::kBlockM;
-    constexpr int kBlockN = Kernel_traits::kBlockN;
+    constexpr int kBlockM = Kernel_traits::kBlockM;    // Query序列的分块大小
+    constexpr int kBlockN = Kernel_traits::kBlockN;    // Key 和 Value 序列的分块
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     constexpr int kNWarps = Kernel_traits::kNWarps;
 
@@ -540,6 +541,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         n_block_max = std::min(n_block_max,
                                cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
     }
+    // 当前的GPU块就只是处理 [n_block_min, n_block_max]之间的块
     if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
         // We exit early and write 0 to gOaccum and -inf to gLSEaccum.
         // Otherwise we might read OOB elements from gK and gV,
@@ -591,14 +593,13 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     const index_t row_offset_k = block_table == nullptr
         ? binfo.k_offset(params.k_batch_stride, params.k_row_stride, bidb_cache)
           + (n_block_max - 1) * kBlockN * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride
-        : (bidh / params.h_h_k_ratio) * params.k_head_stride; // block addresses are later resolved per-thread
+        : (bidh / params.h_h_k_ratio) * params.k_head_stride; 
+        // block addresses are later resolved per-thread
 
     const index_t row_offset_v = block_table == nullptr
         ? binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb_cache)
           + (n_block_max - 1) * kBlockN * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride
         : (bidh / params.h_h_k_ratio) * params.v_head_stride;
-
-    
 
     Tensor mQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.q_ptr) + binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)),
                             make_shape(binfo.actual_seqlen_q, params.h, params.d),
@@ -614,7 +615,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                             make_stride(params.v_row_stride, _1{}));
     Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
                             typename Kernel_traits::SmemLayoutQ{});
-    Tensor sK = make_tensor(sQ.data() + size(sQ), typename Kernel_traits::SmemLayoutKV{});
+    Tensor sK = make_tensor(sQ.data() + size(sQ), typename  Kernel_traits::SmemLayoutKV{});
     Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKV{});
     Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposed{});
     Tensor sVtNoSwizzle = make_tensor(sV.data().get(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});
@@ -650,6 +651,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
     Tensor tOrVt  = thr_mma.partition_fragment_B(sVtNoSwizzle);                // (MMA, MMA_K,MMA_N)
 
+    
     Tensor acc_o = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kHeadDim>>{});  // MMA, MMA_M, MMA_K
 
     //
@@ -865,8 +867,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     // __syncthreads();
 
     clear(acc_o);
-
+    // 这里的2 * size<1>(acc_o) 可以理解为 kNRows 的值  声明在两次循环之前
     flash::Softmax<2 * size<1>(acc_o)> softmax;
+    flash::AttentionSum<2 * size<1>(acc_o), params.max_num_pages_per_seq> attention_sum;
+    // bool is_first_block = false;
+    // bool is_last_block = true;
 
     const float alibi_slope = !Has_alibi ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
     flash::Mask<Is_causal, Is_local, Has_alibi> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
@@ -939,11 +944,15 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             cute::cp_async_fence();
         }
 
+        attention_sum.template update_sum_aw</*n_block_min=*/n_block_min, /*n_block_max=*/n_block_max, /*page_block_size=*/params.page_block_size>(acc_s, n_block);
+
         // We have key_padding_mask so we'll need to Check_inf
         masking_step == 0
             ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local || !Is_even_MN>(acc_s, acc_o, params.scale_softmax_log2)
             : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local || !Is_even_MN>(acc_s, acc_o, params.scale_softmax_log2);
         // if (cute::thread0()) { print(scores_max); print(scores_sum); print(scores); }
+
+
 
         // Convert acc_s from fp32 to fp16/bf16
         Tensor rP = flash::convert_type<Element>(acc_s);
@@ -1003,7 +1012,23 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         mask.template apply_mask</*Causal_mask=*/false>(
             acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
         );
+
+        attention_sum.template update_sum_aw</*n_block_min=*/n_block_min, /*n_block_max=*/n_block_max, /*page_block_size=*/params.page_block_size>(acc_s, n_block);
+
         softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, params.scale_softmax_log2);
+
+        // is_first_block = n_block % params.page_block_size == 0;
+        // is_last_block = (n_block % params.page_block_size == params.page_block_size - 1) || (n_block == n_block_max-1);
+        // is_min_block = n_block == n_block_min;
+        
+        // // 如果当前是第一个block或者是最小的block，则需要获取attention weights sum，将其写出到smem中，再写出到global memory中，最后在combine_attn_seqk_parallel对所有的split进行归约
+        // if (is_first_block || is_min_block) {
+        //     Tensor row_sum_aw = attention_sum.get_attention_weights_sum();   
+        //     """
+        //     将row_sum_aw写入global Mem中,因为row_sum_aw是和lse一样大小,按照下文的代码,lse直接写入gM,Output先到sM再到gM
+        //     """
+
+        // }
 
         Tensor rP = flash::convert_type<Element>(acc_s);
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
@@ -1018,38 +1043,50 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor lse = softmax.template normalize_softmax_lse</*Is_dropout=*/false, Split>(acc_o, params.scale_softmax);
     // if (cute::thread0()) { print(lse); }
 
-    Tensor sOaccum = make_tensor(make_smem_ptr(reinterpret_cast<ElementO *>(smem_)), typename Kernel_traits::SmemLayoutO{}); // (SMEM_M,SMEM_N)
+    Tensor row_sum_aw_page = attention_sum.get_attention_weights_sum();   // (kBlockM, page_block_size) page_block_size不会太小，
+
+    // 在共享内存中创建输出张量sOaccum， smem_ 是共享内存指针 SmemLayoutO：定义共享内存的布局模式 作为目标缓冲区，接受从寄存器转移的数据
+    Tensor sOaccum = make_tensor(make_smem_ptr(reinterpret_cast<ElementO *>(smem_)), typename Kernel_traits::SmemLayoutO{}); //  共享内存 Shape<Int<kBlockM>, Int<kHeadDim>>
+
     // Partition sO to match the accumulator partitioning
     using SmemTiledCopyO = std::conditional_t<
         !Split,
-        typename Kernel_traits::SmemCopyAtomO,
-        typename Kernel_traits::SmemCopyAtomOaccum
+        typename Kernel_traits::SmemCopyAtomO,        // 普通路径
+        typename Kernel_traits::SmemCopyAtomOaccum    // Split-K 路径
     >;
     auto smem_tiled_copy_Oaccum = make_tiled_copy_C(SmemTiledCopyO{}, tiled_mma);
     auto smem_thr_copy_Oaccum = smem_tiled_copy_Oaccum.get_thread_slice(tidx);
-    Tensor rO = flash::convert_type<ElementO>(acc_o);
-    Tensor taccOrOaccum = smem_thr_copy_Oaccum.retile_S(rO);        // ((Atom,AtomNum), MMA_M, MMA_N)
-    Tensor taccOsOaccum = smem_thr_copy_Oaccum.partition_D(sOaccum);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
+    Tensor rO = flash::convert_type<ElementO>(acc_o);               // ElementO: 目标输出类型 rO：转换后的寄存器张量
+    Tensor taccOrOaccum = smem_thr_copy_Oaccum.retile_S(rO);        // 源张量分区 ((Atom,AtomNum), MMA_M, MMA_N) 寄存器
+    Tensor taccOsOaccum = smem_thr_copy_Oaccum.partition_D(sOaccum);     // ((Atom,AtomNum),PIPE_M,PIPE_N) 共享内存 目标张量
 
     // sOaccum is larger than sQ, so we need to syncthreads here
     // TODO: allocate enough smem for sOaccum
     if constexpr (Split) { __syncthreads(); }
-
+    // register到shared memory是无需offset的
     cute::copy(smem_tiled_copy_Oaccum, taccOrOaccum, taccOsOaccum);
 
     const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
         + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
     const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
                                          + m_block * kBlockM) * params.d_rounded;
+                                         // params.d_rounded 是输出维度
     const index_t row_offset_lseaccum = (Split || !params.unpadded_lse ?
             ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q : bidh * params.total_q + binfo.q_offset(params.seqlen_q, 1, bidb)
         ) + m_block * kBlockM;
+    
+    const index_t row_offset_row_sum_aw_page = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q 
+                                                  + m_block * kBlockM) * params.max_num_pages_per_seq;
 
     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
                                  Shape<Int<kBlockM>, Int<kHeadDim>>{},
                                  make_stride(Split ? kHeadDim : params.o_row_stride, _1{}));
     Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(Split ? params.softmax_lseaccum_ptr : params.softmax_lse_ptr) + row_offset_lseaccum),
                                    Shape<Int<kBlockM>>{}, Stride<_1>{});
+
+    Tensor gRowSumAwPage = make_tensor(make_gmem_ptr(reinterpret_cast<float *>(params.attn_weights_sum_accum_ptr) + row_offset_row_sum_aw_page),
+                                    Shape<Int<kBlockM>, Int<params.max_num_pages_per_seq>>{},
+                                    make_stride(params.max_num_pages_per_seq, _1{}));
     // if (tidx == 0) { printf("row_offset_o = %d, bidh = %d, gOaccum = %p\n", row_offset_o, bidh, gOaccum.data()); }
 
     GmemTiledCopyO gmem_tiled_copy_Oaccum;
@@ -1058,16 +1095,18 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_D(gOaccum);
 
     __syncthreads();
-
+    
+    // 只提供类型和形状,数据存储在寄存器中
     Tensor tOrOaccum = make_tensor<ElementO>(shape(tOgOaccum));
     cute::copy(gmem_tiled_copy_Oaccum, tOsOaccum, tOrOaccum);
-
+        
     Tensor caccO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
     Tensor taccOcO = thr_mma.partition_C(caccO);                           // (MMA,MMA_M,MMA_K)
     static_assert(decltype(size<0>(taccOcO))::value == 4);
     // Convert to ((2, 2), MMA_M, MMA_K) then take only the row indices.
     Tensor taccOcO_row = logical_divide(taccOcO, Shape<_2>{})(make_coord(0, _), _, 0);
     CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_row));                     // MMA_M
+    // 只有在当前线程负责的tile(块)在tile的第一列时，这个线程才负责写回lse
     if (get<1>(taccOcO_row(0)) == 0) {
         #pragma unroll
         for (int mi = 0; mi < size(lse); ++mi) {
@@ -1075,10 +1114,23 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             if (row < binfo.actual_seqlen_q - m_block * kBlockM) { gLSEaccum(row) = lse(mi); }
         }
     }
-
-    // Construct identity layout for sO
+    if (get<1>(taccOcO_row(0)) == 0) {
+        #pragma unroll
+        for (int mi = 0; mi < size<0>(row_sum_aw_page); ++mi) {
+            const int row = get<0>(taccOcO_row(mi));
+            if (row < binfo.actual_seqlen_q - m_block * kBlockM){
+                // 写入所有页面的数据
+                #pragma unroll
+                for (int page = 0; page < params.max_num_pages_per_seq; ++page) {
+                    // 这是该split块下的，用等于就行，在combine_attn_seqk_parallel归约
+                    gRowSumAwPage(row, page) = row_sum_aw_page(mi, page);
+                }
+            }
+        }
+    }
+    // Construct identity layout for sO  cO的大小等于sOaccum, 
     Tensor cO = make_identity_tensor(make_shape(size<0>(sOaccum), size<1>(sOaccum)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
-    // Repeat the partitioning with identity layouts
+    // Repeat the partitioning with identity layouts  
     Tensor tOcO = gmem_thr_copy_Oaccum.partition_D(cO);                           // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
     Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgOaccum)));
     if (!Is_even_K) {
@@ -1116,7 +1168,7 @@ inline __device__ void compute_attn(const Params &params) {
 
 template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Split, bool Append_KV, typename Params>
 inline __device__ void compute_attn_splitkv(const Params &params) {
-    const int m_block = blockIdx.x;
+    const int m_block = blockIdx.x;   // 负责处理第几个query block, 对应处理哪些query tokens
     // The block index for the batch.
     const int bidb = Split ? blockIdx.z / params.h : blockIdx.y;
     // The block index for the head.
@@ -1162,7 +1214,7 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
                               Shape<Int<kBlockM>>{}, Stride<_1>{});
 
     // This layout maps row_offset_lse to {bidh, q_offset, bidb} or {bidh, bidb, q_offset}.
-    Layout flat_layout = make_layout(lse_size);
+    Layout flat_layout = make_layout(lse_size);        // 
     Layout orig_layout = make_layout(make_shape(params.seqlen_q, params.h, params.b));
     auto transposed_stride = params.seqlenq_ngroups_swapped ? make_stride(params.b, params.seqlen_q * params.b, 1) : make_stride(1, params.seqlen_q * params.b, params.seqlen_q);
     Layout remapped_layout = make_layout(make_shape(params.seqlen_q, params.h, params.b), transposed_stride);
@@ -1170,10 +1222,11 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
 
     Tensor gLSE_unpadded = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lse_ptr)), final_layout);
 
+    // 每个线程要处理的块的数量
     constexpr int kNLsePerThread = (kMaxSplits * kBlockM + kNThreads - 1) / kNThreads;
 
     // Read the LSE values from gmem and store them in shared memory, then transpose them.
-    constexpr int kRowsPerLoadLSE = kNThreads / kBlockM;
+    constexpr int kRowsPerLoadLSE = kNThreads / kBlockM;   //每一行分给多少线程并行处理
     #pragma unroll
     for (int l = 0; l < kNLsePerThread; ++l) {
         const int row = l * kRowsPerLoadLSE + tidx / kBlockM;
@@ -1184,6 +1237,7 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
     }
     // if (bidx == 1 && tidx < 32) { printf("tidx = %d, row_offset_lse = %d, lse = %f\n", tidx, row_offset_lse, lse_accum(0)); }
     __syncthreads();
+
     Tensor lse_accum = make_tensor<ElementAccum>(Shape<Int<kNLsePerThread>>{});
     constexpr int kRowsPerLoadTranspose = std::min(kRowsPerLoadLSE, kMaxSplits);
     // To make sure that kMaxSplits is within 1 warp: we decide how many elements within kMaxSplits
@@ -1193,6 +1247,7 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
     // static_assert(kThreadsPerSplit <= 32);
     static_assert(kRowsPerLoadTranspose <= 32);
     static_assert(kNLsePerThread * kRowsPerLoadTranspose <= kMaxSplits);
+    
     #pragma unroll
     for (int l = 0; l < kNLsePerThread; ++l) {
         const int row = l * kRowsPerLoadTranspose + tidx % kRowsPerLoadTranspose;
@@ -1209,10 +1264,13 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
     lse_max = Allreduce<kRowsPerLoadTranspose>::run(lse_max, max_op);
     lse_max = lse_max == -INFINITY ? 0.0f : lse_max;  // In case all local LSEs are -inf
     float lse_sum = expf(lse_accum(0) - lse_max);
+    
     #pragma unroll
     for (int l = 1; l < kNLsePerThread; ++l) { lse_sum += expf(lse_accum(l) - lse_max); }
+    
     SumOp<float> sum_op;
     lse_sum = Allreduce<kRowsPerLoadTranspose>::run(lse_sum, sum_op);
+
     // For the case where all local lse == -INFINITY, we want to set lse_logsum to INFINITY. Otherwise
     // lse_logsum is log(0.0) = -INFINITY and we get NaN when we do lse_accum(l) - lse_logsum.
     ElementAccum lse_logsum = (lse_sum == 0.f || lse_sum != lse_sum) ? INFINITY : logf(lse_sum) + lse_max;
@@ -1227,6 +1285,7 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
             gLSE(tidx / kRowsPerLoadTranspose) = lse_logsum;
         }
     }
+
     // Store the scales exp(lse - lse_logsum) in shared memory.
     #pragma unroll
     for (int l = 0; l < kNLsePerThread; ++l) {
@@ -1235,20 +1294,28 @@ inline __device__ void combine_attn_seqk_parallel(const Params &params) {
         if (row < params.num_splits && col < kBlockM) { sLSE[row][col] = expf(lse_accum(l) - lse_logsum); }
     }
     __syncthreads();
-
+    
+    // 计算当前block的内存偏移，在oaccum(全局buffer)中的起点
     const index_t row_offset_oaccum = bidx * kBlockM * params.d_rounded;
     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.oaccum_ptr) + row_offset_oaccum),
                                  Shape<Int<kBlockM>, Int<kHeadDim>>{},
                                  Stride<Int<kHeadDim>, _1>{});
+
+    // 每行分配的线程数量
     constexpr int kBlockN = kNThreads / kBlockM;
+
+    // 全局buffer的布局 定义块内copy的layout
     using GmemLayoutAtomOaccum = Layout<Shape<Int<kBlockM>, Int<kBlockN>>, Stride<Int<kBlockN>, _1>>;
     using GmemTiledCopyOaccum = decltype(
         make_tiled_copy(Copy_Atom<DefaultCopy, ElementAccum>{},
                         GmemLayoutAtomOaccum{},
                         Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
     GmemTiledCopyOaccum gmem_tiled_copy_Oaccum;
+
     auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
     Tensor tOgOaccum = gmem_thr_copy_Oaccum.partition_S(gOaccum);
+
+    // 创建目标寄存器/Shared Memory张量：没有给定内存指针，会放到本地寄存器。
     Tensor tOrO = make_tensor<ElementAccum>(shape(tOgOaccum));
     Tensor tOrOaccum = make_tensor<ElementAccum>(shape(tOgOaccum));
     clear(tOrO);

@@ -66,6 +66,9 @@ struct Flash_fwd_params : public Qkv_params {
     void * __restrict__ softmax_lse_ptr;
     void * __restrict__ softmax_lseaccum_ptr;
 
+    // The pointer to store attention weights sum for each block (for vLLM page similarity)
+    void * __restrict__ attn_weights_sum_ptr;
+
     // The dimensions.
     int b, seqlen_q, seqlen_k, seqlen_knew, d, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim, total_q;
 

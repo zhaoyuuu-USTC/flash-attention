@@ -106,6 +106,17 @@ __device__ __forceinline__ T operator()(T const & x, T const & y) { return x + y
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+template<typename T>
+struct AbsSumOp {
+__device__ __forceinline__ T operator()(T const & x, T const & y) const{ 
+    T x_val = isinf(x) ? T(0.0f) : x;
+    T y_val = isinf(y) ? T(0.0f) : y;
+    return fabs(x_val) + fabs(y_val); 
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 template<int THREADS>
 struct Allreduce {
     static_assert(THREADS == 32 || THREADS == 16 || THREADS == 8 || THREADS == 4);
