@@ -107,7 +107,9 @@ struct Flash_fwd_params : public Qkv_params {
     // Paged KV cache
     int * __restrict__ block_table;
     index_t block_table_batch_stride;
+    
     int page_block_size;
+    int return_attn_weights_sum;
 
     // The dropout probability (probability of keeping an activation).
     float p_dropout;
@@ -139,6 +141,8 @@ struct Flash_fwd_params : public Qkv_params {
     bool is_rotary_interleaved;
 
     int num_splits;  // For split-KV version
+
+    int max_num_pages_per_seq;
 
     void * __restrict__ alibi_slopes_ptr;
     index_t alibi_slopes_batch_stride;

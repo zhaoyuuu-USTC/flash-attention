@@ -326,6 +326,23 @@ int64_t resolve_thread_kv_page_slice_offset(const int tidx, const int n_block_ma
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+template <typename Kernel_traits>
+__forceinline__ __device__
+int64_t get_thread_global_row_offset(const int tidx, const int n_block_max) {
+    constexpr int kGmemThreadsPerRow = Kernel_traits::kGmemThreadsPerRow;
+    constexpr int kGmemRowsPerThread = Kernel_traits::kGmemRowsPerThread;
+    constexpr int kBlockN = Kernel_traits::kBlockN;
+
+    const int64_t block_row_offset = tidx / kGmemThreadsPerRow * kGmemRowsPerThread;
+    const int64_t global_row_offset = block_row_offset + (n_block_max - 1) * kBlockN;
+    // const int64_t page_offset = global_row_offset % page_block_size;
+    // const int64_t virtual_page_idx = global_row_offset / page_block_size;
+
+    return global_row_offset;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Layout reshape function. Given a layout with modes ((v1, v2), m, k), returns (v1, v2, k),         
 // where v2 may be a tuple itself, in the case of swizzled smem-backed thread tiles. This ensures
 // that paged and non-paged copies result in equivalently shaped, if not necessarily strided, tensors.

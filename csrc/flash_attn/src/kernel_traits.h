@@ -46,8 +46,7 @@ struct Flash_kernel_traits {
 };
 
 // If Share_Q_K_smem is true, that forces Is_Q_in_regs to be true
-template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_regs_=false, bool Share_Q_K_smem_=false, typename elem_type=cutlass::half_t,
-         typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
+template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, bool Is_Q_in_regs_=false, bool Share_Q_K_smem_=false, typename elem_type=cutlass::half_t, typename Base=Flash_kernel_traits<kHeadDim_, kBlockM_, kBlockN_, kNWarps_, elem_type> >
 struct Flash_fwd_kernel_traits : public Base {
     using Element = typename Base::Element;
     using ElementAccum = typename Base::ElementAccum;
@@ -70,6 +69,12 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : 32;
     static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
     static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;
+
+    // 添加page维度布局设置逻辑
+    // static constexpr int kPageDim = kPageDim_;
+    // static_assert(kPageDim % kBlockN == 0);
+    // static constexpr int kPageKSmem = kPageDim % 64 == 0 ? 64 : 32;
+    // static constexpr int kPageSwizzle = kPageKSmem == 32 ? 2 : 3;
 
     using TiledMma = TiledMMA<
         typename Base::MMA_Atom_Arch,
@@ -103,6 +108,18 @@ struct Flash_fwd_kernel_traits : public Base {
         Shape<Int<kBlockM>, Int<kHeadDim>>{}));
     using SmemCopyAtomO = Copy_Atom<DefaultCopy, Element>;
     using SmemCopyAtomOaccum = Copy_Atom<DefaultCopy, ElementAccum>;
+
+
+    // using SmemLayoutAtomPage = decltype(
+    //     composition(Swizzle<kPageSwizzle, 3, 3>{},
+    //                 Layout<Shape<Int<8>, Int<kPageKSmem>>,
+    //                        Stride<Int<kPageKSmem>, _1>>{}));
+    // using SmemLayoutPage = decltype(tile_to_shape(
+    //     SmemLayoutAtomPage{},
+    //     Shape<Int<kBlockM>, Int<kPageDim>>{}));
+    // using SmemCopyAtomPage = Copy_Atom<DefaultCopy, Element>;
+    // using SmemCopyAtomPageAccum = Copy_Atom<DefaultCopy, ElementAccum>;
+
 
     static constexpr int kSmemQSize = size(SmemLayoutQ{}) * sizeof(Element);
     static constexpr int kSmemKVSize = size(SmemLayoutKV{}) * 2 * sizeof(Element);
@@ -145,19 +162,38 @@ struct Flash_fwd_kernel_traits : public Base {
     using GmemTiledCopyO = decltype(
         make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
                         GmemLayoutAtom{},
-                        Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store
+                        Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store  half_f 16
+    // using GmemTiledCopyPage = decltype(
+    //     make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
+    //                     GmemLayoutAtom{},
+    //                     Layout<Shape<_1, _8>>{}));
 
     using GmemLayoutAtomOaccum = std::conditional_t<
-        kBlockKSmem == 32,
+        kBlockKSmem == 32,    
         Layout<Shape <_16, _8>,  // Thread layout, 8 threads per row
                Stride< _8, _1>>,
         Layout<Shape <_8, _16>,  // Thread layout, 16 threads per row
                Stride< _16, _1>>
     >;
+    // using GmemLayoutAtomPageaccum = std::conditional_t<
+    //     kPageKSmem == 32,
+    //     Layout<Shape <_16, _8>,  // Thread layout, 8 threads per row
+    //            Stride< _8, _1>>,
+    //     Layout<Shape <_8, _16>,  // Thread layout, 16 threads per row
+    //            Stride< _16, _1>>
+    // >;
+
     using GmemTiledCopyOaccum = decltype(
         make_tiled_copy(Copy_Atom<DefaultCopy, ElementAccum>{},
                         GmemLayoutAtomOaccum{},
-                        Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store
+                        Layout<Shape < _1, _4>>{}));  // Val layout, 4 vals per store Float32
+    
+    // using GmemTiledCopyPageAccum = decltype(
+    //     make_tiled_copy(Copy_Atom<DefaultCopy, ElementAccum>{},
+    //                     GmemLayoutAtomPageaccum{},
+    //                     Layout<Shape<_1, _4>>{}));  // Val layout, 4 vals per store Float32
+    
+    
     using GmemLayoutAtomRotcossin = GmemLayoutAtom;
     using GmemTiledCopyRotcossin = decltype(
         make_tiled_copy(Copy_Atom<UniversalCopy<uint64_t>, Element>{},
@@ -176,6 +212,19 @@ struct Flash_fwd_kernel_traits : public Base {
                         GmemLayoutAtomRotcossin{},
                         Layout<Shape<Int<kGmemRowsPerThread>, _8>, Stride<_8, _1>>{}));  // Val layout, 8 vals per load
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Is_V_in_regs is an option to reduce smem usage, but will increase register pressue.
 // No_double_buffer is another option to reduce smem usage, but will slow things down.

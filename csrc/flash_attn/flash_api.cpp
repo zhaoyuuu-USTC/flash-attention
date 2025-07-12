@@ -34,22 +34,17 @@ void set_params_fprop(Flash_fwd_params &params,
                       const at::Tensor q,
                       const at::Tensor k,
                       const at::Tensor v,
-                      at::Tensor out,
+                      at::Tensor out, 
                       void *cu_seqlens_q_d,     // Query累加序列长度数组，存储每个batch中Query的偏移地址
                       void *cu_seqlens_k_d,     // Key累加序列长度数组
                       void *seqused_k,          // 实际使用的Key数量指针
                       void *p_d,
                       void *softmax_lse_d,      // CUDA kernel 计算 logsumexp(softmax归一化因子)后存储的地址，供backward使用
-                      """
-                      添加attn_weights_sum_d参数,用于存储每个块的attention weights和
-                      """
-                      void *attn_weights_sum_d, // 用于存储每个块的attention weights和的地址
                       float p_dropout,
                       float softmax_scale,
                       int window_size_left,     // 左窗口大小, 只能看到过去的N个token
                       int window_size_right,    // 右窗口大小
                       const float softcap,
-                      const int max_num_blocks_per_seq,
                       bool seqlenq_ngroups_swapped=false,
                       const bool unpadded_lse=false) {
 
@@ -69,6 +64,7 @@ void set_params_fprop(Flash_fwd_params &params,
     params.q_head_stride = q.stride(-2);
     params.k_head_stride = k.stride(-2);
     params.v_head_stride = v.stride(-2);
+
     params.o_ptr = out.data_ptr();
     params.o_row_stride = out.stride(-3);
     params.o_head_stride = out.stride(-2);
@@ -93,12 +89,6 @@ void set_params_fprop(Flash_fwd_params &params,
 
     // Softmax sum
     params.softmax_lse_ptr = softmax_lse_d;
-
-    """
-    params中初始化attn_weights_sum_ptr
-    """
-    // Attention weights sum for each block
-    params.attn_weights_sum_ptr = attn_weights_sum_d;
 
     // Set the dimensions.
     params.b = b;
@@ -126,7 +116,6 @@ void set_params_fprop(Flash_fwd_params &params,
         params.scale_softmax = softmax_scale;
         params.scale_softmax_log2 = softmax_scale * M_LOG2E;
     }
-    params.max_num_pages_per_seq = max_num_blocks_per_seq;
     // Set this to probability of keeping an element to simplify things.
     params.p_dropout = 1.f - p_dropout;
     // Convert p from float to int so we don't have to convert the random uint to float to compare.
@@ -171,7 +160,9 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
                 if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
                     run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
-                } else {
+                } 
+                else {
+                    // force_split_kernel为True， 则使用splitkv kernel
                     run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
                 }
             });
@@ -251,46 +242,6 @@ std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, 
     }
 
     return std::make_tuple(softmax_lse_accum, out_accum);
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> set_params_splitkv_with_attn_weights_sum(Flash_fwd_params &params, const int batch_size,
-    const int num_heads, const int head_size, const int max_seqlen_k, const int max_seqlen_q,
-    const int max_num_blocks_per_seq,
-    const int head_size_rounded, const float p_dropout,
-    const int num_splits, cudaDeviceProp *dprops, struct c10::TensorOptions opts) {
-
-    // This needs to match with run_mha_fwd_splitkv_dispatch
-    const int block_n = head_size <= 64 ? 256 : (head_size <= 128 ? 128 : 64);
-    const int num_n_blocks = (max_seqlen_k + block_n - 1) / block_n;
-    // Technically kBlockM = 64 only for the splitKV kernels, not the standard kernel.
-    // In any case we don't expect seqlen_q to be larger than 64 for inference.
-    const int num_m_blocks = (max_seqlen_q + 64 - 1) / 64;
-    params.num_splits = num_splits;
-    at::Tensor softmax_lse_accum;
-    at::Tensor out_accum;
-    at::Tensor attn_weights_sum_accum;
-
-    if (p_dropout == 0.0f) {  // SplitKV is not implemented for dropout
-        if (num_splits < 1) {
-            // We multiply number of SMs by 2 to hard-code the fact that we're using 128 threads per block.
-            params.num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, dprops->multiProcessorCount * 2, num_n_blocks, 128);
-        }
-        if (params.num_splits > 1) {
-            // torch::empty是pytorch的张量分配函数，在GPU设备上只能分配全局显存
-            softmax_lse_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
-            out_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, head_size_rounded}, opts.dtype(at::kFloat));
-            // 先完全按照softmax_lse_accum的维度来, 加上max_num_blocks_per_seq
-            attn_weights_sum_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
-            // attn_weights_sum_accum = torch::empty({params.num_splits, batch_size, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
-
-            params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
-            params.oaccum_ptr = out_accum.data_ptr();
-            params.attn_weights_sum_ptr = attn_weights_sum_accum.data_ptr();
-        }
-        TORCH_CHECK(params.num_splits <= 128, "num_splits > 128 not supported");
-    }
-
-    return std::make_tuple(softmax_lse_accum, out_accum, attn_weights_sum_accum);
 }
 
 void set_params_alibi(Flash_fwd_params &params, const c10::optional<at::Tensor> &alibi_slopes_, int batch_size, int num_heads){
@@ -444,16 +395,14 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
                      /*seqused_k=*/nullptr,
                      return_softmax ? p.data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
-                     """
-                     第一阶段只修改mha_fwd_kvcache,这里attn_weights_sum_d 为 nullptr
-                     """
-                     nullptr,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
                      window_size_right,
-                     softcap
-                     );
+                     softcap);
+
+    params.return_attn_weights_sum = false;
+    // params.max_num_pages_per_seq = max_num_blocks_per_seq;
 
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;
@@ -688,10 +637,6 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      seqused_k.has_value() ? seqused_k.value().data_ptr() : nullptr,
                      return_softmax ? p.data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
-                     """
-                     第一阶段只修改mha_fwd_kvcache,这里attn_weights_sum_d 为 nullptr
-                     """
-                     nullptr,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
@@ -700,6 +645,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      seqlenq_ngroups_swapped,
                      /*unpadded_lse*/true);
     params.total_q = total_q;
+
+    params.max_num_pages_per_seq = max_num_blocks_per_seq;
 
     if (paged_KV) {
         params.block_table = block_table.data_ptr<int>();
@@ -777,10 +724,6 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
                 const c10::optional<at::Tensor> &block_table_, // batch_size x max_num_blocks_per_seq
                 const c10::optional<at::Tensor> &alibi_slopes_, // num_heads or batch_size x num_heads
                 const c10::optional<at::Tensor> &out_,             // batch_size x seqlen_q x num_heads x head_size
-                """
-                添加 attn_weights_sum_ 参数,用于存储每个块(page)的attention weights和
-                """
-                const c10::optional<at::Tensor> &attn_weights_sum_, // batch_size x max_num_blocks_per_seq
                 const double softmax_scale,
                 bool is_causal,
                 int64_t window_size_left,
@@ -899,8 +842,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
         out = torch::empty_like(q_padded);
     }
     
-    at::Tensor attn_weights_sum;
-    attn_weights_sum = torch::empty({batch_size, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
+    // at::Tensor attn_weights_sum;
+    // attn_weights_sum = torch::empty({batch_size, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
 
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
     const int head_size = round_multiple(head_size_og, 8);
@@ -912,8 +855,9 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     // Cast to char to avoid compiler warning about narrowing
     at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
-    auto opts = q.options();
+    auto opts = q.options();  // opts 保存的是 q 张量的设备（cpu / cuda）、数据类型（float16 / float32 等）和 layout 信息, 它可以用来确保创建的 tensor 与 q 有相同的“属性”
 
+    // opts.dtype(at::kFloat)：将数据类型指定为 float32，即使 q 是 float16、bfloat16，softmax_lse 仍然保留较高精度。 因为FA在softmax的累加过程中会将其提升至float32精度
     auto softmax_lse = torch::empty({batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
 
     Flash_fwd_params params;
@@ -929,17 +873,13 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
                      /*seqused_k=*/nullptr,
                      /*p_ptr=*/nullptr,
                      softmax_lse.data_ptr(),
-                     """
-                     添加attn_weights_sum的物理地址
-                     """
-                     attn_weights_sum.data_ptr(),
                      /*p_dropout=*/0.f,
                      softmax_scale,
                      window_size_left,
                      window_size_right,
-                     softcap,
-                     max_num_blocks_per_seq
-                     );
+                     softcap);
+    
+    params.return_attn_weights_sum = false;
 
     at::Tensor k, v, k_padded, v_padded;
     if (k_.has_value()) {
@@ -1020,9 +960,9 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     }
 
     // Keep references to these tensors to extend their lifetime
-    at::Tensor softmax_lse_accum, out_accum, attn_weights_sum_accum;
-    std::tie(softmax_lse_accum, out_accum, attn_weights_sum_accum) = set_params_splitkv_with_attn_weights_sum(
-        params, batch_size, num_heads, head_size, seqlen_k, seqlen_q, max_num_blocks_per_seq,
+    at::Tensor softmax_lse_accum, out_accum;
+    std::tie(softmax_lse_accum, out_accum) = set_params_splitkv(
+        params, batch_size, num_heads, head_size, seqlen_k, seqlen_q,
         head_size_rounded, /*dropout*/ 0.f, num_splits, dprops, opts);
 
     if (paged_KV) {
@@ -1053,7 +993,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
         out = out.transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, head_size_og});
         softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * seqlen_q, 1});
     }
-    return {out, softmax_lse, attn_weights_sum};
+    return {out, softmax_lse};
 }
 
 

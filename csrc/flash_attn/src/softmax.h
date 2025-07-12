@@ -55,11 +55,11 @@ __device__ __forceinline__ void reduce_max(Tensor<Engine0, Layout0> const& tenso
     reduce_<zero_init>(tensor, max, max_op);
 }
 
-template<bool zero_init=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
-__device__ __forceinline__ void reduce_sum_aw(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1> &sum){
-    AbsSumOp<float> abs_sum_op;
-    reduce_<zero_init>(tensor, sum, abs_sum_op);
-}
+// template<bool zero_init=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
+// __device__ __forceinline__ void reduce_sum_aw(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1> &sum){
+//     AbsSumOp<float> abs_sum_op;
+//     reduce_<zero_init>(tensor, sum, abs_sum_op);
+// }
 
 template<bool zero_init=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1> &sum){
@@ -134,6 +134,7 @@ template <int kNRows>
 struct Softmax {
 
     using TensorT = decltype(make_tensor<float>(Shape<Int<kNRows>>{}));
+    
     TensorT row_max, row_sum;
     // TensorT row_sum_aw;
 
