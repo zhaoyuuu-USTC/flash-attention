@@ -993,7 +993,26 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
         out = out.transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, head_size_og});
         softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * seqlen_q, 1});
     }
-    return {out, softmax_lse};
+    // 创建包含 params 关键信息的 tensor
+    auto params_tensor = torch::tensor({
+        float(params.b),              // batch_size     3
+        float(params.seqlen_q),       // seqlen_q       4 ngroups
+        float(params.seqlen_k),       // seqlen_k       (1328/16+1)*16=1344
+        float(params.seqlen_knew),    // seqlen_knew    0
+        float(params.h),              // num_heads      2 
+        float(params.h_k),            // num_heads_k    2
+        float(params.d),              // head_size      256
+        float(params.scale_softmax),  // scale_softmax  0.0625
+        float(params.rotary_dim),     // rotary_dim     0
+        float(params.is_causal),      // is_causal      0
+        float(params.window_size_left),  // window_size_left  -1
+        float(params.window_size_right), // window_size_right -1
+        float(params.softcap),        // softcap
+        float(params.page_block_size), // page_block_size 32
+        float(params.num_splits)       // 21
+    }, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    
+    return {out, softmax_lse, params_tensor};
 }
 
 

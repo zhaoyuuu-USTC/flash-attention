@@ -34,7 +34,8 @@ __forceinline__ __device__ void apply_softcap(Tensor<Engine, Layout> &tensor, co
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename ElementAccum, typename Params, int kBlockM, bool Is_even_MN>
-__forceinline__ __device__ auto get_lse_tile(const Params &params, const int bidb, const int bidh, const int m_block, const BlockInfo</*Varlen=*/!Is_even_MN> &binfo) {
+__forceinline__ __device__ auto get_lse_tile(const Params &params, const int bidb, const int bidh, const int m_block, const BlockInfo</*Varlen=*/!Is_even_MN> &binfo) {       
+        // 只有当执行mha_varlen_fwd时， unpadded_lse为true
         // When params.unpadded_lse is false, LSE is written as (b, h, seqlen_q) - this is non-variable seqlen path.
         // Otherwise, when params.seqlenq_ngroups_swapped is true, it is written as (h, seqlen_q, b) to account for seqlen_q <-> h swapping trick.
         // Otherwise, it's written as (h, b, seqlen_q).

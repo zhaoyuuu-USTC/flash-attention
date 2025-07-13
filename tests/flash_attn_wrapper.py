@@ -75,8 +75,9 @@ def flash_attn_with_kvcache(
         causal: bool = False,
         alibi_slopes: Optional[torch.Tensor] = None,
         softcap: float = 0.0,
+        return_softmax_lse: bool = False,
 ) -> torch.Tensor:
-    return _flash_attn_with_kvcache(
+    result = _flash_attn_with_kvcache(
         decode_query,
         key_cache,
         value_cache,
@@ -86,7 +87,11 @@ def flash_attn_with_kvcache(
         causal=causal,
         alibi_slopes=alibi_slopes,
         softcap=softcap,
+        return_softmax_lse=return_softmax_lse,
     )
+    # 如果 return_softmax_lse=True，result 是 (out, softmax_lse)，但自定义操作符只能返回单个tensor
+    # 所以我们只返回 attention output
+    return result[2] if return_softmax_lse else result
 
 @flash_attn_with_kvcache.register_fake  # type: ignore
 def _(
@@ -99,5 +104,6 @@ def _(
         causal: bool = False,
         alibi_slopes: Optional[torch.Tensor] = None,
         softcap: float = 0.0,
+        return_softmax_lse: bool = False,
 ) -> torch.Tensor:
     return torch.empty_like(decode_query)
