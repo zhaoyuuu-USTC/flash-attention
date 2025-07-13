@@ -3,6 +3,7 @@ import torch
 
 from vllm_flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
 from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
+from vllm_flash_attn import flash_attn_with_kvcache_aws as _flash_attn_with_kvcache_aws
 
 
 @torch.library.custom_op("vllm::flash_attn_varlen_func", mutates_args=[])
@@ -91,7 +92,36 @@ def flash_attn_with_kvcache(
     )
     # 如果 return_softmax_lse=True，result 是 (out, softmax_lse)，但自定义操作符只能返回单个tensor
     # 所以我们只返回 attention output
-    return result[2] if return_softmax_lse else result
+    return result[0] if return_softmax_lse else result
+
+@torch.library.custom_op("vllm::flash_attn_with_kvcache_aws", mutates_args=[])
+def flash_attn_with_kvcache_aws(
+        decode_query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cache_seqlens: Optional[torch.Tensor] = None,
+        block_table: Optional[torch.Tensor] = None,
+        softmax_scale: Optional[float] = None,
+        causal: bool = False,
+        alibi_slopes: Optional[torch.Tensor] = None,
+        softcap: float = 0.0,
+        return_softmax_lse: bool = False,
+) -> torch.Tensor:
+    result = _flash_attn_with_kvcache_aws(
+        decode_query,
+        key_cache,
+        value_cache,
+        cache_seqlens=cache_seqlens,
+        block_table=block_table,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        alibi_slopes=alibi_slopes,
+        softcap=softcap,
+        return_softmax_lse=return_softmax_lse,
+    )
+    # 如果 return_softmax_lse=True，result 是 (out, softmax_lse)，但自定义操作符只能返回单个tensor
+    # 所以我们只返回 attention output
+    return result[0] if return_softmax_lse else result
 
 @flash_attn_with_kvcache.register_fake  # type: ignore
 def _(

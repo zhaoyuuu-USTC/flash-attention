@@ -275,7 +275,7 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
     // Launch the kernel.
     launcher(launch_params, false);
 
-    return { z, x, dmask, mu, rsigma };
+    return std::vector<at::Tensor>{ z, x, dmask, mu, rsigma };
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -644,7 +644,7 @@ std::vector<at::Tensor> dropout_add_ln_parallel_residual_fwd(
     // Launch the kernel.
     launcher(launch_params, false);
 
-    return { z0, z1, x, dmask0, dmask1, mu, rsigma };
+    return std::vector<at::Tensor>{ z0, z1, x, dmask0, dmask1, mu, rsigma };
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

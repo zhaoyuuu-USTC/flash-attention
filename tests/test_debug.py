@@ -95,7 +95,7 @@ def test_flash_attn_kvcache():
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    results = torch.ops.vllm.flash_attn_with_kvcache(
+    results = torch.ops.vllm.flash_attn_with_kvcache_aws(
         decode_query=query.unsqueeze(1),
         key_cache=key_cache,
         value_cache=value_cache,
