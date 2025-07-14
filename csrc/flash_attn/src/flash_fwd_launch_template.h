@@ -94,8 +94,8 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                     BOOL_SWITCH(params.knew_ptr != nullptr, Append_KV, [&] {
                         ALIBI_SWITCH(params.alibi_slopes_ptr != nullptr, Has_alibi, [&] {
                             SOFTCAP_SWITCH(params.softcap > 0.0, Is_softcap, [&] {
-                                MAXPAGES_SWITCH(params.max_num_pages_per_seq, MAXPAGES, [&] {
-                                    auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && !Append_KV && IsEvenKConst && !Is_local && Kernel_traits::kHeadDim <= 128, IsEvenKConst, Is_softcap, Split, Append_KV, MAXPAGES>;
+                                MAXPAGES_SWITCH(params.max_num_pages_per_seq, [&] {
+                                    auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && !Append_KV && IsEvenKConst && !Is_local && Kernel_traits::kHeadDim <= 128, IsEvenKConst, Is_softcap, Split, Append_KV, MaxPages>;
                                     if (smem_size >= 48 * 1024) {
                                         C10_CUDA_CHECK(cudaFuncSetAttribute(
                                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
@@ -114,21 +114,21 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         constexpr static int kBlockM = Kernel_traits::kHeadDim % 128 == 0 ? 4 : (Kernel_traits::kHeadDim % 64 == 0 ? 8 : 16);
         dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
         EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
-            MAXPAGES_SWITCH(params.max_num_pages_per_seq, MAXPAGES, [&] {
+            MAXPAGES_SWITCH(params.max_num_pages_per_seq, [&] {
                 if (params.num_splits <= 2) {
-                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 1, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 1, IsEvenKConst, MaxPages><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
                 } else if (params.num_splits <= 4) {
-                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 2, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 2, IsEvenKConst, MaxPages><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
                 } else if (params.num_splits <= 8) {
-                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 3, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 3, IsEvenKConst, MaxPages><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
                 } else if (params.num_splits <= 16) {
-                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 4, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 4, IsEvenKConst, MaxPages><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
                 } else if (params.num_splits <= 32) {
-                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 5, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 5, IsEvenKConst, MaxPages><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
                 } else if (params.num_splits <= 64) {
-                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 6, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 6, IsEvenKConst, MaxPages><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
                 } else if (params.num_splits <= 128) {
-                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 7, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 7, IsEvenKConst, MaxPages><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
                 }
                 C10_CUDA_KERNEL_LAUNCH_CHECK();
             });
