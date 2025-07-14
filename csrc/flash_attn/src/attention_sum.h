@@ -44,28 +44,32 @@ __device__ __forceinline__ void reduce_sum_aw(Tensor<Engine0, Layout0> const& te
     thread_aws_reduce_<zero_init>(tensor, sum, abs_sum_op);
 }
 
-template<int KNRows, int num_pages>
+template<int KMRows>
 struct AttentionSum {
-    using TensorT = decltype(make_tensor<float>(Shape<Int<KNRows>>{}));
+
+    using TensorT = decltype(make_tensor<float>(Shape<Int<KMRows>>{}));
     TensorT row_sum_aw;
     
     __forceinline__ __device__ AttentionSum() {};
     // 这里从后往前遍历的块
-    template<bool Is_first_block, typename Tensor0, typename Tensor1>
-    __forceinline__ __device__ void update_sum_aw(Tensor0 &acc_s, Tensor1 &aws_page, int page_idx){
+    template<typename Tensor0, typename Tensor1>
+    __forceinline__ __device__ void update_sum_aw(Tensor0 &acc_s, Tensor1 &aws, int n_block, int page_block_size){
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         
-        // 这里的每一块都进行一次线程内归约和线程间归约,最后将结果累加到aws_page中
-        static_assert(decltype(size<0>(scores))::value == KNRows);
-        flash::template reduce_sum_aw</*zero_init=*/false>(scores, row_sum_aw);
-        flash::template quad_aws_allreduce_(row_sum_aw, row_sum_aw, flash::AbsSumOp<float>());
+        static_assert(decltype(size<0>(scores))::value == KMRows);
+
+
+
+        flash::template reduce_sum_aw</*zero_init=*/true>(scores, row_sum_aw);
+        AbsSumOp<float> abs_sum_op;
+        flash::template quad_aws_allreduce_(row_sum_aw, row_sum_aw, abs_sum_op);
         
-        // Tensor aws_page_rowcol = make_tensor(aws_page.data(), flash::convert_layout_acc_rowcol(aws_page.layout()));
-        static_assert(decltype(size<0>(aws_page))::value == KNRows);
+        Tensor aws_rowcol = make_tensor(aws.data(), flash::convert_layout_acc_rowcol(aws.layout()));
 
         #pragma unroll
-        for (int mi = 0; mi < size(row_sum_aw); ++mi){
-            aws_page(mi, page_idx) += row_sum_aw(mi);
+        for (int mi = 0; mi < size(row_sum_aw); ++mi) {
+            int page_idx = n_block / page_block_size;
+            aws_rowcol(mi, page_idx) += row_sum_aw(mi);
         }
     };
 

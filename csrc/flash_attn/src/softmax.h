@@ -130,7 +130,7 @@ __forceinline__ __device__ void max_scale_exp2_sum(Tensor<Engine0, Layout0> &ten
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kNRows>
+template <int kNRows>   // 2 * acc_o size<1>（kBlockM）
 struct Softmax {
 
     using TensorT = decltype(make_tensor<float>(Shape<Int<kNRows>>{}));

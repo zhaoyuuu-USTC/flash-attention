@@ -91,8 +91,6 @@ void set_params_fprop(Flash_fwd_params &params,
     // Softmax sum
     params.softmax_lse_ptr = softmax_lse_d;
 
-    params.block_aws_ptr = block_aws_d;
-
     // Set the dimensions.
     params.b = b;
     params.h = h;
@@ -151,6 +149,149 @@ void set_params_fprop(Flash_fwd_params &params,
 
     #ifdef FLASHATTENTION_DISABLE_UNEVEN_K
         TORCH_CHECK(d == d_rounded, "This flash attention build does not support headdim not being a multiple of 32.");
+    #endif
+
+    params.unpadded_lse = unpadded_lse;
+    params.seqlenq_ngroups_swapped = seqlenq_ngroups_swapped;
+}
+
+void set_params_fprop_aws(Flash_fwd_params &params,
+    // sizes
+    const size_t b,
+    const size_t seqlen_q,
+    const size_t seqlen_k,
+    const size_t seqlen_q_rounded,
+    const size_t seqlen_k_rounded,
+    const size_t h,
+    const size_t h_k,
+    const size_t d,
+    const size_t d_rounded,
+    // device pointers
+    const at::Tensor q,
+    const at::Tensor k,
+    const at::Tensor v,
+    at::Tensor out, 
+    at::Tensor block_aws,
+    void *cu_seqlens_q_d,     // Query累加序列长度数组，存储每个batch中Query的偏移地址
+    void *cu_seqlens_k_d,     // Key累加序列长度数组
+    void *seqused_k,          // 实际使用的Key数量指针
+    void *p_d,
+    void *softmax_lse_d,      // CUDA kernel 计算 logsumexp(softmax归一化因子)后存储的地址，供backward使用
+    void *block_aws_d,        // CUDA kernel 计算 block 后存储的地址，供backward使用
+    float p_dropout,
+    float softmax_scale,
+    int window_size_left,     // 左窗口大小, 只能看到过去的N个token
+    int window_size_right,    // 右窗口大小
+    const float softcap,
+    bool seqlenq_ngroups_swapped=false,
+    const bool unpadded_lse=false) {
+
+    // Reset the parameters
+    params = {};
+
+    params.is_bf16 = q.dtype() == torch::kBFloat16;
+
+    // Set the pointers and strides.
+    params.q_ptr = q.data_ptr();
+    params.k_ptr = k.data_ptr();
+    params.v_ptr = v.data_ptr();
+    // All stride are in elements, not bytes.
+    params.q_row_stride = q.stride(-3);
+    params.k_row_stride = k.stride(-3);
+    params.v_row_stride = v.stride(-3);
+    params.q_head_stride = q.stride(-2);
+    params.k_head_stride = k.stride(-2);
+    params.v_head_stride = v.stride(-2);
+
+    params.o_ptr = out.data_ptr();
+    params.o_row_stride = out.stride(-3);
+    params.o_head_stride = out.stride(-2);
+    params.aws_ptr = block_aws.data_ptr();
+    params.aws_row_stride = block_aws.stride(-3);
+    params.aws_head_stride = block_aws.stride(-2);
+
+
+    if (cu_seqlens_q_d == nullptr) {
+        params.q_batch_stride = q.stride(0);
+        params.k_batch_stride = k.stride(0);
+        params.v_batch_stride = v.stride(0);
+        params.o_batch_stride = out.stride(0);
+        params.aws_batch_stride = block_aws.stride(0);
+        if (seqlenq_ngroups_swapped) {
+            params.q_batch_stride *= seqlen_q;
+            params.o_batch_stride *= seqlen_q;
+            params.aws_batch_stride *= seqlen_q;
+        }
+    }
+
+    params.cu_seqlens_q = static_cast<int *>(cu_seqlens_q_d);
+    params.cu_seqlens_k = static_cast<int *>(cu_seqlens_k_d);
+    params.seqused_k = static_cast<int *>(seqused_k);
+
+    // P = softmax(QK^T)
+    params.p_ptr = p_d;
+
+    // Softmax sum
+    params.softmax_lse_ptr = softmax_lse_d;
+
+    // Set the dimensions.
+    params.b = b;
+    params.h = h;
+    params.h_k = h_k;
+    params.h_h_k_ratio = h / h_k;
+    params.seqlen_q = seqlen_q;
+    params.seqlen_k = seqlen_k;
+    params.seqlen_q_rounded = seqlen_q_rounded;
+    params.seqlen_k_rounded = seqlen_k_rounded;
+    params.d = d;
+    params.d_rounded = d_rounded;
+
+    // Set the different scale values.
+    #ifdef FLASHATTENTION_DISABLE_SOFTCAP
+    TORCH_CHECK(softcap <= 0.0, "This flash attention build does not support softcap.");
+    #endif
+    if (softcap > 0.0) {
+        params.softcap = softmax_scale / softcap;
+        params.scale_softmax = softcap;
+        params.scale_softmax_log2 = softcap * M_LOG2E;
+    } else{
+        // Remove potential NaN
+        params.softcap = 0.0;
+        params.scale_softmax = softmax_scale;
+        params.scale_softmax_log2 = softmax_scale * M_LOG2E;
+    }
+    // Set this to probability of keeping an element to simplify things.
+    params.p_dropout = 1.f - p_dropout;
+    // Convert p from float to int so we don't have to convert the random uint to float to compare.
+    // [Minor] We want to round down since when we do the comparison we use <= instead of <
+    // params.p_dropout_in_uint = uint32_t(std::floor(params.p_dropout * 4294967295.0));
+    // params.p_dropout_in_uint16_t = uint16_t(std::floor(params.p_dropout * 65535.0));
+    params.p_dropout_in_uint8_t = uint8_t(std::floor(params.p_dropout * 255.0));
+    params.rp_dropout = 1.f / params.p_dropout;
+    params.scale_softmax_rp_dropout = params.rp_dropout * params.scale_softmax;
+    TORCH_CHECK(p_dropout < 1.f);
+    #ifdef FLASHATTENTION_DISABLE_DROPOUT
+    TORCH_CHECK(p_dropout == 0.0f, "This flash attention build does not support dropout.");
+    #endif
+
+    // Causal is the special case where window_size_right == 0 and window_size_left < 0.
+    // Local is the more general case where window_size_right >= 0 or window_size_left >= 0.
+    params.is_causal = window_size_left < 0 && window_size_right == 0;
+
+    if (window_size_left < 0 && window_size_right >= 0) { window_size_left = seqlen_k; }
+    if (window_size_left >= 0 && window_size_right < 0) { window_size_right = seqlen_k; }
+    params.window_size_left = window_size_left;
+    params.window_size_right = window_size_right;
+
+    #ifdef FLASHATTENTION_DISABLE_LOCAL
+    TORCH_CHECK(params.is_causal || (window_size_left < 0 && window_size_right < 0),
+    "This flash attention build does not support local attention.");
+    #endif
+
+    params.is_seqlens_k_cumulative = true;
+
+    #ifdef FLASHATTENTION_DISABLE_UNEVEN_K
+    TORCH_CHECK(d == d_rounded, "This flash attention build does not support headdim not being a multiple of 32.");
     #endif
 
     params.unpadded_lse = unpadded_lse;
@@ -274,7 +415,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> set_params_splitkv_aws(Flash_fwd_
             params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
             params.oaccum_ptr = out_accum.data_ptr();
 
-            at::Tensor block_aws_accum = torch::empty({params.num_splits, batch_size, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
+            block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
             params.block_awsaccum_ptr = block_aws_accum.data_ptr();
         }
         TORCH_CHECK(params.num_splits <= 128, "num_splits > 128 not supported");
@@ -422,6 +563,7 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
     }
 
     Flash_fwd_params params;
+    params.return_attn_weights_sum = false;
     set_params_fprop(params,
                      batch_size,
                      seqlen_q, seqlen_k,
@@ -441,7 +583,6 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
                      window_size_right,
                      softcap);
 
-    params.return_attn_weights_sum = false;
     // params.max_num_pages_per_seq = max_num_blocks_per_seq;
 
     // Keep references to these tensors to extend their lifetime
@@ -1190,14 +1331,14 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
         out = torch::empty_like(q_padded);
     }
 
-    // at::Tensor attn_weights_sum;
-    // attn_weights_sum = torch::empty({batch_size, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
-
+ 
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
     const int head_size = round_multiple(head_size_og, 8);
     const int head_size_rounded = round_multiple(head_size, 32);
     const int seqlen_q_rounded = round_multiple(seqlen_q, 128);
     const int seqlen_k_rounded = round_multiple(seqlen_k, 128);
+
+    const int max_num_blocks_per_seq_rounded = round_multiple(max_num_blocks_per_seq, 8);
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -1207,16 +1348,16 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
 
     // opts.dtype(at::kFloat)：将数据类型指定为 float32，即使 q 是 float16、bfloat16，softmax_lse 仍然保留较高精度。 因为FA在softmax的累加过程中会将其提升至float32精度
     auto softmax_lse = torch::empty({batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
-    auto block_aws = torch::empty({batch_size, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
+    at::Tensor block_aws = torch::empty({batch_size, num_heads, seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
 
     Flash_fwd_params params;
-    set_params_fprop(params,
+    set_params_fprop_aws(params,
                      batch_size,
                      seqlen_q, seqlen_k,
                      seqlen_q_rounded, seqlen_k_rounded,
                      num_heads, num_heads_k,
                      head_size, head_size_rounded,
-                     q_padded, kcache_padded, vcache_padded, out,
+                     q_padded, kcache_padded, vcache_padded, out, block_aws,
                      /*cu_seqlens_q_d=*/nullptr,
                      /*cu_seqlens_k_d=*/nullptr,
                      /*seqused_k=*/nullptr,

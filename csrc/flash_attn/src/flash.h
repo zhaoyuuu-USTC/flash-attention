@@ -59,6 +59,10 @@ struct Flash_fwd_params : public Qkv_params {
     index_t o_row_stride;
     index_t o_head_stride;
 
+    index_t aws_batch_stride;
+    index_t aws_row_stride;
+    index_t aws_head_stride;
+
     // The pointer to the P matrix.
     void * __restrict__ p_ptr;
 
@@ -67,7 +71,7 @@ struct Flash_fwd_params : public Qkv_params {
     void * __restrict__ softmax_lseaccum_ptr;
 
     // The pointer to store attention weights sum for each block (for vLLM page similarity)
-    void * __restrict__ block_aws_ptr;
+    void * __restrict__ aws_ptr;
     void * __restrict__ block_awsaccum_ptr;
 
     // The dimensions.

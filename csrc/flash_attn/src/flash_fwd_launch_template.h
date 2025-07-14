@@ -35,17 +35,17 @@ DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_kernel, bool Is_dropout, bool Is_causal, b
     #endif
 }
 
-DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_kernel, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Split, bool Append_KV) {
+DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_kernel, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Split, bool Append_KV, int MAXPAGES) {
     #if defined(ARCH_SUPPORTS_FLASH)
-        flash::compute_attn_splitkv<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Is_softcap, Split, Append_KV>(params);
+        flash::compute_attn_splitkv<Kernel_traits, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Is_softcap, Split, Append_KV, MAXPAGES>(params);
     #else
         FLASH_UNSUPPORTED_ARCH
     #endif
 }
 
-DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_combine_kernel, int kBlockM, int Log_max_splits, bool Is_even_K) {
+DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_combine_kernel, int kBlockM, int Log_max_splits, bool Is_even_K, int MAXPAGES) {
     static_assert(Log_max_splits >= 1);
-    flash::combine_attn_seqk_parallel<Kernel_traits, kBlockM, Log_max_splits, Is_even_K>(params);
+    flash::combine_attn_seqk_parallel<Kernel_traits, kBlockM, Log_max_splits, Is_even_K, MAXPAGES>(params);
 }
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
@@ -94,13 +94,15 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                     BOOL_SWITCH(params.knew_ptr != nullptr, Append_KV, [&] {
                         ALIBI_SWITCH(params.alibi_slopes_ptr != nullptr, Has_alibi, [&] {
                             SOFTCAP_SWITCH(params.softcap > 0.0, Is_softcap, [&] {
-                                auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && !Append_KV && IsEvenKConst && !Is_local && Kernel_traits::kHeadDim <= 128, IsEvenKConst, Is_softcap, Split, Append_KV>;
-                                if (smem_size >= 48 * 1024) {
-                                    C10_CUDA_CHECK(cudaFuncSetAttribute(
-                                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-                                }
-                                kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
-                                C10_CUDA_KERNEL_LAUNCH_CHECK();
+                                MAXPAGES_SWITCH(params.max_num_pages_per_seq, MAXPAGES, [&] {
+                                    auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && !Append_KV && IsEvenKConst && !Is_local && Kernel_traits::kHeadDim <= 128, IsEvenKConst, Is_softcap, Split, Append_KV, MAXPAGES>;
+                                    if (smem_size >= 48 * 1024) {
+                                        C10_CUDA_CHECK(cudaFuncSetAttribute(
+                                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                                    }
+                                    kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
+                                    C10_CUDA_KERNEL_LAUNCH_CHECK();
+                                });
                             });
                         });
                     });
@@ -112,22 +114,24 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         constexpr static int kBlockM = Kernel_traits::kHeadDim % 128 == 0 ? 4 : (Kernel_traits::kHeadDim % 64 == 0 ? 8 : 16);
         dim3 grid_combine((params.b * params.h * params.seqlen_q + kBlockM - 1) / kBlockM);
         EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
-            if (params.num_splits <= 2) {
-                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 1, IsEvenKConst><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
-            } else if (params.num_splits <= 4) {
-                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 2, IsEvenKConst><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
-            } else if (params.num_splits <= 8) {
-                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 3, IsEvenKConst><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
-            } else if (params.num_splits <= 16) {
-                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 4, IsEvenKConst><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
-            } else if (params.num_splits <= 32) {
-                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 5, IsEvenKConst><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
-            } else if (params.num_splits <= 64) {
-                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 6, IsEvenKConst><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
-            } else if (params.num_splits <= 128) {
-                flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 7, IsEvenKConst><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
-            }
-            C10_CUDA_KERNEL_LAUNCH_CHECK();
+            MAXPAGES_SWITCH(params.max_num_pages_per_seq, MAXPAGES, [&] {
+                if (params.num_splits <= 2) {
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 1, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                } else if (params.num_splits <= 4) {
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 2, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                } else if (params.num_splits <= 8) {
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 3, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                } else if (params.num_splits <= 16) {
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 4, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                } else if (params.num_splits <= 32) {
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 5, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                } else if (params.num_splits <= 64) {
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 6, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                } else if (params.num_splits <= 128) {
+                    flash_fwd_splitkv_combine_kernel<Kernel_traits, kBlockM, 7, IsEvenKConst, MAXPAGES><<<grid_combine, Kernel_traits::kNThreads, 0, stream>>>(params);
+                }
+                C10_CUDA_KERNEL_LAUNCH_CHECK();
+            });
         });
     }
 }
