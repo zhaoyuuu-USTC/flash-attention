@@ -15,8 +15,7 @@ DTYPE_MAP = {
 }
 
 SM = [80]  # Sm80 kernels support up to
-# HEAD_DIMENSIONS = [32, 64, 96, 128, 160, 192, 224, 256]
-HEAD_DIMENSIONS = [32, 64, 96, 128]
+HEAD_DIMENSIONS = [32, 64, 96, 128, 160, 192, 224, 256]
 IS_CAUSAL = ["false", "true"]
 KERNEL_IMPL_TEMPLATE_FWD = """#include "flash_fwd_launch_template.h"
 
@@ -29,6 +28,7 @@ void run_mha_fwd_<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}>(Flash_fwd_params &params, cu
 KERNEL_IMPL_TEMPLATE_FWD_SPLIT = """#include "flash_fwd_launch_template.h"
 
 template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}>(Flash_fwd_params &params, cudaStream_t stream);
+template void run_mha_fwd_splitkv_dispatch_aws<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}>(Flash_fwd_params &params, cudaStream_t stream);
 """
 
 KERNEL_IMPL_TEMPLATE_BWD = """#include "flash_bwd_launch_template.h"

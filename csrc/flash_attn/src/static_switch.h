@@ -87,63 +87,7 @@
     }                                        \
   }()
 
-#define MAXPAGES_SWITCH(MAXPAGES, ...)   \
-  [&] {                                          \
-    if (MAXPAGES <= 32) {                            \
-      constexpr static int MaxPages = 32;  \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 64) {            \
-      constexpr static int MaxPages = 64;  \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 96) {            \
-      constexpr static int MaxPages = 96;  \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 128) {           \
-      constexpr static int MaxPages = 128; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 160) {           \
-      constexpr static int MaxPages = 160; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 192) {           \
-      constexpr static int MaxPages = 192; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 224) {           \
-      constexpr static int MaxPages = 224; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 256) {           \
-      constexpr static int MaxPages = 256; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 288) {           \
-      constexpr static int MaxPages = 288; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 320) {           \
-      constexpr static int MaxPages = 320; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 352) {           \
-      constexpr static int MaxPages = 352; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 384) {           \
-      constexpr static int MaxPages = 384; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <=  416) {           \
-      constexpr static int MaxPages = 416; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 448) {           \
-      constexpr static int MaxPages = 448; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 480) {           \
-      constexpr static int MaxPages = 480; \
-      return __VA_ARGS__();                \
-    } else if (MAXPAGES <= 512) {           \
-      constexpr static int MaxPages = 512; \
-      return __VA_ARGS__();                \
-    } else {                                    \
-      constexpr static int MaxPages = 1024; \
-      return __VA_ARGS__();                     \
-    }                                           \
-  }()             
-
-#define HEADDIM_SWITCH(HEADDIM, ...)       \
+#define HEADDIM_SWITCH(HEADDIM, ...)   \
   [&] {                                    \
     if (HEADDIM <= 32) {                   \
       constexpr static int kHeadDim = 32;  \
@@ -156,15 +100,6 @@
       return __VA_ARGS__();                \
     } else if (HEADDIM <= 128) {           \
       constexpr static int kHeadDim = 128; \
-      return __VA_ARGS__();                \
-    } else if (HEADDIM <= 160) {           \
-      constexpr static int kHeadDim = 160; \
-      return __VA_ARGS__();                \
-    } else if (HEADDIM <= 192) {           \
-      constexpr static int kHeadDim = 192; \
-      return __VA_ARGS__();                \
-    } else if (HEADDIM <= 256) {           \
-      constexpr static int kHeadDim = 256; \
       return __VA_ARGS__();                \
     }                                      \
   }()

@@ -1,10 +1,9 @@
 from typing import Optional, List, Tuple
 import torch
 
-from vllm_flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
-from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
-from vllm_flash_attn import flash_attn_with_kvcache_aws as _flash_attn_with_kvcache_aws
-
+from vllm_flash_attn.flash_attn_interface import flash_attn_with_kvcache as _flash_attn_with_kvcache
+from vllm_flash_attn.flash_attn_interface import flash_attn_with_kvcache_aws as _flash_attn_with_kvcache_aws
+from vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func as _flash_attn_varlen_func
 
 @torch.library.custom_op("vllm::flash_attn_varlen_func", mutates_args=[])
 def flash_attn_varlen_func(
@@ -121,7 +120,8 @@ def flash_attn_with_kvcache_aws(
     )
     # 如果 return_softmax_lse=True，result 是 (out, softmax_lse)，但自定义操作符只能返回单个tensor
     # 所以我们只返回 attention output
-    return result[0] if return_softmax_lse else result
+    print(f"result: {result.shape}")
+    return result
 
 @flash_attn_with_kvcache.register_fake  # type: ignore
 def _(
@@ -137,3 +137,25 @@ def _(
         return_softmax_lse: bool = False,
 ) -> torch.Tensor:
     return torch.empty_like(decode_query)
+
+@flash_attn_with_kvcache_aws.register_fake  # type: ignore
+def _(
+        decode_query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cache_seqlens: Optional[torch.Tensor] = None,
+        block_table: Optional[torch.Tensor] = None,
+        softmax_scale: Optional[float] = None,
+        causal: bool = False,
+        alibi_slopes: Optional[torch.Tensor] = None,
+        softcap: float = 0.0,
+        return_softmax_lse: bool = False,
+) -> torch.Tensor:
+    # 创建与decode_query相同dtype的output
+    output = torch.empty_like(decode_query)
+    # block_aws 通常与 output 有相同的dtype
+    # block_aws的shape为(*output.shape[:-1], 32)
+    block_aws_shape = output.shape[:-1] + (32,)
+    block_aws = torch.empty(block_aws_shape, dtype=output.dtype, device=output.device)
+    # block_aws = torch.empty_like(decode_query)
+    return  block_aws

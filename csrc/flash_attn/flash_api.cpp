@@ -305,6 +305,9 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
                 if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
                     run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
                 } 
+                else if (params.return_attn_weights_sum) {
+                    run_mha_fwd_splitkv_dispatch_aws<elem_type, kHeadDim, Is_causal>(params, stream);
+                }
                 else {
                     // force_split_kernel为True， 则使用splitkv kernel
                     run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
@@ -389,7 +392,7 @@ std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, 
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> set_params_splitkv_aws(Flash_fwd_params &params, const int batch_size,
-    const int num_heads, const int head_size, const int max_seqlen_k, const int max_seqlen_q, const int max_num_blocks_per_seq,
+    const int num_heads, const int head_size, const int max_seqlen_k, const int max_seqlen_q, const int max_num_blocks_per_seq_rounded,
     const int head_size_rounded, const float p_dropout,
     const int num_splits, cudaDeviceProp *dprops, struct c10::TensorOptions opts) {
 
@@ -415,7 +418,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> set_params_splitkv_aws(Flash_fwd_
             params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
             params.oaccum_ptr = out_accum.data_ptr();
 
-            block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq}, opts.dtype(at::kFloat));
+            // block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
+            block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
             params.block_awsaccum_ptr = block_aws_accum.data_ptr();
         }
         TORCH_CHECK(params.num_splits <= 128, "num_splits > 128 not supported");
@@ -1289,6 +1293,19 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
         seqlen_q = ngroups;
         num_heads = num_heads_k;
     }
+    auto opts = q.options();  // opts 保存的是 q 张量的设备（cpu / cuda）、数据类型（float16 / float32 等）和 layout 信息, 它可以用来确保创建的 tensor 与 q 有相同的“属性”
+
+    int max_num_blocks_per_seq_rounded = 0;
+    if (max_num_blocks_per_seq <= 32) {
+        max_num_blocks_per_seq_rounded = 32;
+    } else if (max_num_blocks_per_seq <= 128) {
+        max_num_blocks_per_seq_rounded = 128;
+    } else if (max_num_blocks_per_seq <= 512) {
+        max_num_blocks_per_seq_rounded = 512;
+    }
+    // 之后加上 判断split的逻辑
+    at::Tensor block_aws = torch::empty({batch_size, num_heads, seqlen_q, max_num_blocks_per_seq_rounded}, opts).transpose(1, 2);
+    
 
     if (window_size_left >= seqlen_k) { window_size_left = -1; }
     if (window_size_right >= seqlen_k) { window_size_right = -1; }
@@ -1331,6 +1348,9 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
         out = torch::empty_like(q_padded);
     }
 
+    // if (seqlenq_ngroups_swapped) {
+    //     block_aws = block_aws.reshape({batch_size, num_heads, seqlen_q, max_num_blocks_per_seq_rounded}).transpose(1, 2);
+    // }
  
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
     const int head_size = round_multiple(head_size_og, 8);
@@ -1338,18 +1358,15 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
     const int seqlen_q_rounded = round_multiple(seqlen_q, 128);
     const int seqlen_k_rounded = round_multiple(seqlen_k, 128);
 
-    const int max_num_blocks_per_seq_rounded = round_multiple(max_num_blocks_per_seq, 8);
-
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
     at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
-    auto opts = q.options();  // opts 保存的是 q 张量的设备（cpu / cuda）、数据类型（float16 / float32 等）和 layout 信息, 它可以用来确保创建的 tensor 与 q 有相同的“属性”
+    // auto opts = q.options();  // opts 保存的是 q 张量的设备（cpu / cuda）、数据类型（float16 / float32 等）和 layout 信息, 它可以用来确保创建的 tensor 与 q 有相同的“属性”
 
     // opts.dtype(at::kFloat)：将数据类型指定为 float32，即使 q 是 float16、bfloat16，softmax_lse 仍然保留较高精度。 因为FA在softmax的累加过程中会将其提升至float32精度
     auto softmax_lse = torch::empty({batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
-    at::Tensor block_aws = torch::empty({batch_size, num_heads, seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
-
+    // at::Tensor block_aws = torch::empty({batch_size, num_heads, seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
     Flash_fwd_params params;
     set_params_fprop_aws(params,
                      batch_size,
@@ -1454,7 +1471,7 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
     at::Tensor softmax_lse_accum, out_accum, block_aws_accum;
     std::tie(softmax_lse_accum, out_accum, block_aws_accum) = set_params_splitkv_aws(
         params, batch_size, num_heads, head_size, seqlen_k, seqlen_q, 
-        max_num_blocks_per_seq,
+        max_num_blocks_per_seq_rounded,
         head_size_rounded, /*dropout*/ 0.f, num_splits, dprops, opts);
 
     if (paged_KV) {
@@ -1480,14 +1497,17 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
             vcache.copy_(vcache_padded.index({"...", torch::indexing::Slice(torch::indexing::None, head_size_og)}));
         }
     }
-
+    // block_aws   torch.Size([3, 1, 8, 32])
+    // block_aws_accum[0]  torch.Size([3, 2, 4, 32])
     if (seqlenq_ngroups_swapped) {
         out = out.transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, head_size_og});
         softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * seqlen_q, 1});
+        block_aws = block_aws.transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, max_num_blocks_per_seq_rounded});   // 3, 1, 8, 32
+
+        // block_aws_accum[0] = block_aws_accum[0].transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, max_num_blocks_per_seq_rounded});
     }
 
-
-    return {out, softmax_lse};
+    return {out, block_aws};
 }
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {

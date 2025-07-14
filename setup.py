@@ -107,11 +107,6 @@ class cmake_build_ext(build_ext):
                 num_jobs = len(os.sched_getaffinity(0))
             except AttributeError:
                 num_jobs = os.cpu_count()
-            
-            # 减少默认进程数，防止内存不足被kill
-            # 使用CPU核心数的1/4，但至少保留2个进程，最多不超过8个
-            num_jobs = max(2, min(8, num_jobs // 4))
-            logger.info("Reduced number of jobs to %d to prevent OOM.", num_jobs)
 
         nvcc_threads = None
         if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
@@ -217,10 +212,7 @@ class cmake_build_ext(build_ext):
 
         num_jobs, _ = self.compute_num_jobs()
 
-        # 进一步减少进程数，防止内存不足被kill
-        # 确保不超过2个进程，给系统留出足够内存
-        num_jobs = min(num_jobs, 8)
-        logger.info("Final number of jobs: %d", num_jobs)
+        
 
         build_args = [
             "--build",
