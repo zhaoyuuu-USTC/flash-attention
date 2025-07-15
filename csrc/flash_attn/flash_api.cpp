@@ -419,7 +419,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> set_params_splitkv_aws(Flash_fwd_
             params.oaccum_ptr = out_accum.data_ptr();
 
             // block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
-            block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq_rounded},);
+            block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
             params.block_awsaccum_ptr = block_aws_accum.data_ptr();
         }
         TORCH_CHECK(params.num_splits <= 128, "num_splits > 128 not supported");
