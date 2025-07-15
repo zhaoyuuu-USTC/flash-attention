@@ -53,12 +53,10 @@ struct AttentionSum {
     __forceinline__ __device__ AttentionSum() {};
     // 这里从后往前遍历的块
     template<typename Tensor0, typename Tensor1>
-    __forceinline__ __device__ void update_sum_aw(Tensor0 &acc_s, Tensor1 &aws, int n_block, int page_block_size){
+    __forceinline__ __device__ void update_sum_aw(Tensor0 &acc_s, Tensor1 &aws, int n_block, int page_block_size, int kBlockN){
         Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
         
         static_assert(decltype(size<0>(scores))::value == KMRows);
-
-
 
         flash::template reduce_sum_aw</*zero_init=*/true>(scores, row_sum_aw);
         AbsSumOp<float> abs_sum_op;
@@ -68,11 +66,10 @@ struct AttentionSum {
 
         #pragma unroll
         for (int mi = 0; mi < size(row_sum_aw); ++mi) {
-            int page_idx = n_block / page_block_size;
+            int page_idx = n_block * kBlockN / page_block_size;
             aws_rowcol(mi, page_idx) += row_sum_aw(mi);
         }
     };
-
 };
 
 }  // namespace flash

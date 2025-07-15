@@ -419,7 +419,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> set_params_splitkv_aws(Flash_fwd_
             params.oaccum_ptr = out_accum.data_ptr();
 
             // block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
-            block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq_rounded}, opts.dtype(at::kFloat));
+            block_aws_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, max_num_blocks_per_seq_rounded},);
             params.block_awsaccum_ptr = block_aws_accum.data_ptr();
         }
         TORCH_CHECK(params.num_splits <= 128, "num_splits > 128 not supported");
@@ -708,8 +708,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     if (softcap > 0.f) { TORCH_CHECK(p_dropout == 0.f, "Softcapping does not support dropout for now"); }
 
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
-    const int num_blocks = !paged_KV ? 0 : k.size(0);
-    const int page_block_size = !paged_KV ? 1 : k.size(1);
+    const int num_blocks = !paged_KV ? 0 : k.size(0);        // 页数
+    const int page_block_size = !paged_KV ? 1 : k.size(1);   // 每个page内token的数量
     TORCH_CHECK(!paged_KV || page_block_size % 16 == 0, "Paged KV cache block size must be divisible by 16");
 
     if (max_seqlen_q == 1 && !alibi_slopes_.has_value()) { is_causal = false; }  // causal=true is the same as causal=false in this case
@@ -1497,14 +1497,11 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
             vcache.copy_(vcache_padded.index({"...", torch::indexing::Slice(torch::indexing::None, head_size_og)}));
         }
     }
-    // block_aws   torch.Size([3, 1, 8, 32])
-    // block_aws_accum[0]  torch.Size([3, 2, 4, 32])
+
     if (seqlenq_ngroups_swapped) {
         out = out.transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, head_size_og});
         softmax_lse = softmax_lse.reshape({batch_size, num_heads_k * seqlen_q, 1});
         block_aws = block_aws.transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, max_num_blocks_per_seq_rounded});   // 3, 1, 8, 32
-
-        // block_aws_accum[0] = block_aws_accum[0].transpose(1, 2).reshape({batch_size, 1, num_heads_k * seqlen_q, max_num_blocks_per_seq_rounded});
     }
 
     return {out, block_aws};

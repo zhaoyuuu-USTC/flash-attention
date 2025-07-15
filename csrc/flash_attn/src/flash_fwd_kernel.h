@@ -1146,7 +1146,7 @@ inline __device__ void compute_attn_1rowblock_splitkv_aws(const Params &params, 
     const int tidx = threadIdx.x;
 
     constexpr int kBlockM = Kernel_traits::kBlockM;    // Query序列的分块大小
-    constexpr int kBlockN = Kernel_traits::kBlockN;    // Key 和 Value 序列的分块
+    constexpr int kBlockN = Kernel_traits::kBlockN;    // Key 和 Value 序列的分块大小
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     constexpr int kNWarps = Kernel_traits::kNWarps;
     
@@ -1602,8 +1602,8 @@ inline __device__ void compute_attn_1rowblock_splitkv_aws(const Params &params, 
             // isn't right and we get race conditions.
             cute::cp_async_fence();
         }
-
-        attention_sum.template update_sum_aw(acc_s, aws, n_block, params.page_block_size);
+        
+        attention_sum.template update_sum_aw(acc_s, aws, n_block, params.page_block_size, kBlockN);
         // // 将 row_sum_aw 写入 sum_aw
         // if (sum_aw != nullptr) {
         //     // sum_aw 的类型为 float*，row_sum_aw 是 Tensor
@@ -1680,7 +1680,7 @@ inline __device__ void compute_attn_1rowblock_splitkv_aws(const Params &params, 
         mask.template apply_mask</*Causal_mask=*/false>(
             acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
         );
-        attention_sum.template update_sum_aw(acc_s, aws, n_block, params.page_block_size);
+        attention_sum.template update_sum_aw(acc_s, aws, n_block, params.page_block_size, kBlockN);
         // attention_sum.template update_sum_aw</*n_block_min=*/n_block_min, /*n_block_max=*/n_block_max, /*page_block_size=*/params.page_block_size>(acc_s, n_block);
 
         softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, params.scale_softmax_log2);
@@ -2307,7 +2307,7 @@ inline __device__ void combine_attn_seqk_parallel_aws(const Params &params) {
 
     const index_t row_offset_aaccum = bidx * kBlockM * MaxPages;
     
-    Tensor gAaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.block_awsaccum_ptr) + row_offset_aaccum), Shape<Int<kBlockM>, Int<MaxPages>>{}, make_stride(MaxPages, _1{}));
+    Tensor gAaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.block_awsaccum_ptr) + row_offset_aaccum), Shape<Int<kBlockM>, Int<MaxPages>>{}, Stride<Int<MaxPages>, _1>{});
 
     // constexpr int kBlockN = kNThreads / kBlockM;
 

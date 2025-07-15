@@ -141,7 +141,7 @@ def test_flash_attn_with_paged_kv(
         softcap=soft_cap if soft_cap is not None else 0,
     )
     block_aws = result.squeeze(1)
-    print(f"block_aws: {block_aws}")
+    # print(f"block_aws: {block_aws}")
     # t1 = time.perf_counter()
     # t_with_kvcache = t1 - t0
     # print(f"time_flash_attn_with_kvcache: {t_with_kvcache}")

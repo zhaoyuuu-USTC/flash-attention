@@ -153,9 +153,6 @@ def _(
 ) -> torch.Tensor:
     # 创建与decode_query相同dtype的output
     output = torch.empty_like(decode_query)
-    # block_aws 通常与 output 有相同的dtype
-    # block_aws的shape为(*output.shape[:-1], 32)
     block_aws_shape = output.shape[:-1] + (32,)
     block_aws = torch.empty(block_aws_shape, dtype=output.dtype, device=output.device)
-    # block_aws = torch.empty_like(decode_query)
     return  block_aws
