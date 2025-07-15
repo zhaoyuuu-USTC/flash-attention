@@ -1304,7 +1304,7 @@ mha_fwd_kvcache_aws(at::Tensor &q,                 // batch_size x seqlen_q x nu
         max_num_blocks_per_seq_rounded = 512;
     }
     // 之后加上 判断split的逻辑
-    at::Tensor block_aws = torch::empty({batch_size, num_heads, seqlen_q, max_num_blocks_per_seq_rounded}, opts).transpose(1, 2);
+    at::Tensor block_aws = torch::ones({batch_size, num_heads, seqlen_q, max_num_blocks_per_seq_rounded}, opts).transpose(1, 2);
     
 
     if (window_size_left >= seqlen_k) { window_size_left = -1; }

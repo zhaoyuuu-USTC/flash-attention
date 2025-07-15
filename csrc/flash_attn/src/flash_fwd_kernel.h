@@ -1805,6 +1805,7 @@ inline __device__ void compute_attn_1rowblock_splitkv_aws(const Params &params, 
     auto smem_tiled_copy_Aaccum = make_tiled_copy_C(SmemTiledCopyA{}, tiled_mma);
     auto smem_thr_copy_Aaccum = smem_tiled_copy_Aaccum.get_thread_slice(tidx);
     Tensor rA = flash::convert_type<ElementO>(aws);
+
     Tensor tAWSrAaccum = smem_thr_copy_Aaccum.partition_S(rA);
     Tensor tAWSsAaccum = smem_thr_copy_Aaccum.partition_D(sAaccum);
 
@@ -1833,7 +1834,7 @@ inline __device__ void compute_attn_1rowblock_splitkv_aws(const Params &params, 
 
     if (!Is_even_K) {
         #pragma unroll
-        for (int k = 0; k < size(tApA); ++k) { tApA(k) = get<1>(tAcA(0, 0, k)) < params.d; }
+        for (int k = 0; k < size(tApA); ++k) { tApA(k) = get<1>(tAcA(0, 0, k)) < MaxPages; }
     }
 
     flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
@@ -2308,7 +2309,14 @@ inline __device__ void combine_attn_seqk_parallel_aws(const Params &params) {
     const index_t row_offset_aaccum = bidx * kBlockM * MaxPages;
     
     Tensor gAaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.block_awsaccum_ptr) + row_offset_aaccum), Shape<Int<kBlockM>, Int<MaxPages>>{}, Stride<Int<MaxPages>, _1>{});
-
+    // 将gAaccum全部元素设为1    // 如果block_aws还是1，则是后面的问题，awsaccum的问题，不是1，则是前面的问题
+    #pragma unroll
+    for (int m = 0; m < size<0>(gAaccum); ++m) {
+        #pragma unroll
+        for (int n = 0; n < size<1>(gAaccum); ++n) {
+            gAaccum(m, n) = ElementAccum(1);
+        }
+    }
     // constexpr int kBlockN = kNThreads / kBlockM;
 
     using GmemLayoutAtomAaccum = Layout<Shape<Int<kBlockM>, Int<kBlockN>>, Stride<Int<kBlockN>, _1>>;
@@ -2371,7 +2379,13 @@ inline __device__ void combine_attn_seqk_parallel_aws(const Params &params) {
                 if (Is_even_K || tApAaccum(k)) {
                     const int col = get<1>(tAcAaccum(0, m, k));
                     Tensor gA = make_tensor(make_gmem_ptr(a_ptr + col), Shape<Int<decltype(size<0>(rA))::value>>{}, Stride<_1>{});
-                    copy(rA(_, m, k), gA);
+                    // copy(rA(_, m, k), gA);   原版是复制，这里改成了加法
+
+                    // 这里改成了加法，且block_aws初始化为1，总体返回是1，因此rA是0
+                    #pragma unroll
+                    for (int i = 0; i < size<0>(rA); ++i) {
+                        gA(i) += rA(i, m, k);
+                    }
                 }
             }
         }
